@@ -67,6 +67,8 @@ class Global(object):
                  device: str):
         self.model = light_resnet14(num_classes)
         self.model.to(device)
+        self.model1 = light_resnet14(num_classes)
+        self.model1.to(device)
         self.dict_global_params = self.model.state_dict()
         self.unlabeled_data = unlabeled_data
         self.total_steps = total_steps
