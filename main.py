@@ -19,14 +19,12 @@ import os
 def args_parser():
     parser = argparse.ArgumentParser()
     path_dir = os.path.dirname(__file__)
-    
-
     parser.add_argument('--path_cifar10', type=str, default=os.path.join(path_dir, 'data/CIFAR10/'))
     parser.add_argument('--path_cifar100', type=str, default=os.path.join(path_dir, 'data/CIFAR100/'))
     parser.add_argument('--num_classes', type=int, default=10)
     parser.add_argument('--num_clients', type=int, default=20)
     parser.add_argument('--num_online_clients', type=int, default=8)
-    parser.add_argument('--num_rounds', type=int, default=100)
+    parser.add_argument('--num_rounds', type=int, default=50)
 
     parser.add_argument('--num_data_train', type=int, default=50000)
 
@@ -41,13 +39,13 @@ def args_parser():
     parser.add_argument('--lr_global_teaching', type=float, default=0.001)
     parser.add_argument('--lr_local_training', type=float, default=0.1)
 
-    parser.add_argument('--temperature', type=float, default=1.)
-
+    parser.add_argument('--temperature', type=float, default=1)
     parser.add_argument('--device', type=str, default='cuda')
 
     parser.add_argument('--ratio_imbalance', type=float, default=1.)
-    parser.add_argument('--non_iid_alpha', type=float, default=0.1)
+   # parser.add_argument('--non_iid_alpha', type=float, default=10000000000000)
     parser.add_argument('--seed', type=int, default=123456)
+    parser.add_argument('--seed1', type=int, default=987087)
     parser.add_argument('--low', type=int, default=5000)
     parser.add_argument('--high', type=int, default=5000)
 
@@ -66,8 +64,8 @@ class Global(object):
                  temperature: float,
                  device: str):
         self.model = light_resnet14(num_classes)
-        self.model.to(device)
         self.model1 = light_resnet14(num_classes)
+        self.model.to(device)
         self.model1.to(device)
         self.dict_global_params = self.model.state_dict()
         self.unlabeled_data = unlabeled_data
@@ -75,13 +73,14 @@ class Global(object):
         self.mini_batch_size = mini_batch_size
         self.ce_loss = CrossEntropyLoss()
         self.kld_loss = KLDivLoss(reduction='batchmean')
+        #self.optimizer = Adam(self.model.parameters(), lr=lr_global_teaching, betas=(0.9, 0.99), eps=1e-8)
         self.optimizer = Adam(self.model.parameters(), lr=lr_global_teaching)
         self.lr_scheduler = lr_scheduler.MultiStepLR(self.optimizer, milestones=[5, 20], gamma=0.1)
         self.temperature = temperature
         self.device = device
         self.epoch_acc = []
         self.epoch_loss = []
-
+        '''
     def update(self, list_dicts_local_params: list, list_nums_local_data: list):
         self._initialize_for_model_fusion(list_dicts_local_params, list_nums_local_data)
         total_indices = [i for i in range(len(self.unlabeled_data))]
@@ -101,7 +100,45 @@ class Global(object):
             # self.lr_scheduler.step()
 
         self.dict_global_params = self.model.state_dict()
+        '''
 
+    def update(self, list_dicts_local_params: list, list_nums_local_data: list):
+        self._initialize_for_model_fusion(list_dicts_local_params, list_nums_local_data)
+        self.model.load_state_dict(self.dict_global_params)
+        self.model.train()
+        for step in tqdm(range(self.total_steps)):
+            total_indices = [i for i in range(len(self.unlabeled_data))]
+            batch_indices = np.random.choice(total_indices, self.mini_batch_size, replace=False)
+            images = []
+            for idx in batch_indices:
+                image, _ = self.unlabeled_data[idx]
+                images.append(image)
+            images = stack(images, dim=0)
+            images = images.to(self.device)
+            logits_teacher = self._avg_logits(images, list_dicts_local_params)
+            self._teach(images, logits_teacher)
+        self.dict_global_params = self.model.state_dict()
+
+        '''
+
+
+    def update(self, list_dicts_local_params: list, list_nums_local_data: list):
+        self._initialize_for_model_fusion(list_dicts_local_params, list_nums_local_data)
+        for step in tqdm(range(self.total_steps)):
+            total_indices = [i for i in range(len(self.unlabeled_data))]
+            batch_indices = np.random.choice(total_indices, self.mini_batch_size, replace=False)
+            images = []
+            for idx in batch_indices:
+                image, _ = self.unlabeled_data[idx]
+                images.append(image)
+            images = stack(images, dim=0)
+            images = images.to(self.device)
+            logits_teacher = self._avg_logits(images, list_dicts_local_params)
+            self.model.load_state_dict(self.dict_global_params)
+            self.model.train()
+            self._teach(images, logits_teacher)
+        self.dict_global_params = self.model.state_dict()
+'''
     def _teach(self, images, logits_teacher):
         logits_student = self.model(images)
         x = log_softmax(div(logits_student, self.temperature), -1)
@@ -122,10 +159,9 @@ class Global(object):
     def _avg_logits(self, images, list_dicts_local_params: list):
         list_logits = []
         for dict_local_params in list_dicts_local_params:
-            self.model.load_state_dict(dict_local_params)
-            self.model.eval()
-            list_logits.append(self.model(images))
-
+            self.model1.load_state_dict(dict_local_params)
+            self.model1.eval()
+            list_logits.append(self.model1(images))
         return sum(list_logits) / len(list_logits)
 
     def eval(self, data_test, batch_size_test: int):
@@ -135,7 +171,7 @@ class Global(object):
             test_loader = DataLoader(data_test, batch_size_test)
             num_corrects = 0
             list_loss = []
-            for data_batch in tqdm(test_loader):
+            for data_batch in tqdm(test_loader, desc='global testing'):
                 images, labels = data_batch
                 images, labels = images.to(self.device), labels.to(self.device)
                 outputs = self.model(images)
@@ -145,11 +181,9 @@ class Global(object):
                 list_loss.append(loss_batch.cpu().item())
             accuracy = num_corrects / len(data_test)
             loss = sum(list_loss) / len(list_loss)
-            print('acc: %.04f' % accuracy)
-            print('loss: %.04f' % loss)
-        return accuracy, loss
-            #self.epoch_acc.append(accuracy)
-            #self.epoch_loss.append(loss)
+
+            self.epoch_acc.append(accuracy)
+            self.epoch_loss.append(loss)
 
     def download_params(self):
         return self.dict_global_params
@@ -177,7 +211,7 @@ class Local(object):
             data_loader = DataLoader(dataset=data_client,
                                      batch_size=self.batch_size,
                                      shuffle=True)
-            for data_batch in tqdm(data_loader, desc=f'Epoch: [{epoch + 1}/{self.num_epochs}]'):
+            for data_batch in data_loader:
                 images, labels = data_batch
                 images, labels = images.to(self.device), labels.to(self.device)
                 outputs = self.model(images)
@@ -190,9 +224,9 @@ class Local(object):
         return self.model.state_dict()
 
 
-def main():
+def feddf(non_iid_alpha):
     args = args_parser()
-    random_state = np.random.RandomState(args.seed)
+    random_state = np.random.RandomState(args.seed1)
     # Load data
     data_local_training = datasets.CIFAR10(args.path_cifar10, transform=ToTensor())
     data_global_test = datasets.CIFAR10(args.path_cifar10, train=False, transform=ToTensor())
@@ -203,7 +237,7 @@ def main():
     #如果需要全局不平衡，则修改low和high的值，使其不一样
     list_label2indices_imbalance = make_imbalance(list_label2indices_train, args.low, args.high, args.seed)
     list_client2indices = clients_indices(list_label2indices_imbalance, args.num_classes, args.num_clients,
-                                          args.non_iid_alpha, args.seed)
+                                          non_iid_alpha, args.seed)
     show_clients_data_distribution(data_local_training, list_client2indices, args.num_classes)
     indices2data = Indices2Dataset(data_local_training)
 
@@ -220,8 +254,7 @@ def main():
                         lr_local_training=args.lr_local_training,
                         device=args.device)
     total_clients = list(range(args.num_clients))
-    all_losses1 = []
-    all_acces1 = []
+
     for r in range(args.num_rounds):
         dict_global_params = global_model.download_params()
         online_clients = random_state.choice(total_clients, args.num_online_clients, replace=False)
@@ -229,8 +262,8 @@ def main():
         list_dicts_local_params = []
         list_nums_local_data = []
         # local training
-        for idx, client in enumerate(online_clients):
-            print(f'Round: [{r + 1}/{args.num_rounds}] Local Training: [{idx + 1}/{args.num_online_clients}]')
+        for client in tqdm(online_clients, desc='local training'):
+            #print(f'Round: [{r + 1}/{args.num_rounds}] Local Training: [{idx + 1}/{args.num_online_clients}]')
             indices2data.load(list_client2indices[client])
             data_client = indices2data
             list_nums_local_data.append(len(data_client))
@@ -242,40 +275,23 @@ def main():
         global_model.update(list_dicts_local_params, list_nums_local_data)
         # global valuation
         print(f'Round: [{r + 1}/{args.num_rounds}] Global Testing')
-        acc, loss = global_model.eval(data_global_test, args.batch_size_test)
-        all_acces1.append(acc)
-        all_losses1.append(loss)
+        global_model.eval(data_global_test, args.batch_size_test)
         print('-' * 21)
-    return all_acces1, all_losses1
+        print('Accuracy')
+        print(global_model.epoch_acc)
+        print('Loss')
+        print(global_model.epoch_loss)
       #  print(f'A: {args.non_iid_alpha}')
        # print(f'E: {args.num_epochs_local_training}')
         #print(f'B: {args.batch_size_local_training}')
-      #  print('Accuracy')
 
-       # print(global_model.epoch_acc)
-       # print('Loss')
-       # print(global_model.epoch_loss)
 
 
 if __name__ == '__main__':
     args = args_parser()
-    all_acces1, all_losses1 = main()
 
-    X = range(0, args.num_rounds)
-    # 绘制acc图
-    plt.figure()
-    plt.plot(list(X), all_acces1, label='FedDF')
-    plt.xlabel("Global rounds")
-    plt.ylabel("Testing Accuracy")
-    plt.grid()  # 生成网格
-    plt.legend()
+    #all_acces3, all_losses3 = feddf(100000000)  # balance-feddf
+    #print('balance-feddf-acc: ', all_acces3)
+    #print('balance-feddf-loss: ', all_losses3)
 
-    # 绘制loss图
-    plt.figure()
-    plt.plot(list(X), all_losses1, label='FedDF')
-    plt.xlabel("Global rounds")
-    plt.ylabel("Training Loss")
-    plt.grid()  # 生成网格
-    plt.legend()
-
-    plt.show()
+    feddf(1)  # imbalance-feddf
