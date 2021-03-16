@@ -1,6 +1,6 @@
 import argparse
 import numpy as np
-from torch import stack, div, max, eq, no_grad, tensor
+from torch import stack, div, max, eq, no_grad, tensor, save, load
 from torch.optim import SGD, Adam, lr_scheduler
 from torch.nn import CrossEntropyLoss, KLDivLoss
 from torch.nn.functional import softmax, log_softmax
@@ -23,14 +23,14 @@ def args_parser():
     parser.add_argument('--path_cifar100', type=str, default=os.path.join(path_dir, 'data/CIFAR100/'))
     parser.add_argument('--num_classes', type=int, default=10)
     parser.add_argument('--num_clients', type=int, default=20)
-    parser.add_argument('--num_online_clients', type=int, default=4)
+    parser.add_argument('--num_online_clients', type=int, default=8)
     parser.add_argument('--num_rounds', type=int, default=100)
 
     parser.add_argument('--num_data_train', type=int, default=50000)
     parser.add_argument('--num_data_valid', type=int, default=500)
 
-    parser.add_argument('--num_epochs_local_training', type=int, default=40)
-    parser.add_argument('--batch_size_local_training', type=int, default=4)
+    parser.add_argument('--num_epochs_local_training', type=int, default=20)
+    parser.add_argument('--batch_size_local_training', type=int, default=64)
 
     parser.add_argument('--total_steps', type=int, default=10000)
     parser.add_argument('--mini_batch_size', type=int, default=128)
@@ -229,6 +229,8 @@ class Global(object):
 
 class Local(object):
     def __init__(self,
+                 dict_global_params,
+                 data_client,
                  num_classes: int,
                  num_epochs_local_training: int,
                  batch_size_local_training: int,
@@ -236,17 +238,18 @@ class Local(object):
                  device: str):
         self.model = light_resnet14(num_classes)
         self.model.to(device)
+        self.model.load_state_dict(dict_global_params)
+        self.data_client = data_client
         self.num_epochs = num_epochs_local_training
         self.batch_size = batch_size_local_training
         self.ce_loss = CrossEntropyLoss()
         self.optimizer = SGD(self.model.parameters(), lr=lr_local_training)
         self.device = device
 
-    def train(self, dict_global_params, data_client):
-        self.model.load_state_dict(dict_global_params)
+    def train(self):
         self.model.train()
         for epoch in range(self.num_epochs):
-            data_loader = DataLoader(dataset=data_client,
+            data_loader = DataLoader(dataset=self.data_client,
                                      batch_size=self.batch_size,
                                      shuffle=True)
             for data_batch in data_loader:
@@ -298,11 +301,6 @@ def main():
                           device=args.device,
                           seed=args.seed,
                           num_online_clients=args.num_online_clients)
-    local_model = Local(num_classes=args.num_classes,
-                        num_epochs_local_training=args.num_epochs_local_training,
-                        batch_size_local_training=args.batch_size_local_training,
-                        lr_local_training=args.lr_local_training,
-                        device=args.device)
     total_clients = list(range(args.num_clients))
     for r in range(args.num_rounds):
         dict_global_params = global_model.download_params()
@@ -315,7 +313,14 @@ def main():
             indices2data.load(list_client2indices[client])
             data_client = indices2data
             list_nums_local_data.append(len(data_client))
-            local_model.train(dict_global_params, data_client)
+            local_model = Local(dict_global_params=dict_global_params,
+                                data_client=data_client,
+                                num_classes=args.num_classes,
+                                num_epochs_local_training=args.num_epochs_local_training,
+                                batch_size_local_training=args.batch_size_local_training,
+                                lr_local_training=args.lr_local_training,
+                                device=args.device)
+            local_model.train()
             dict_local_params = local_model.upload_params()
             list_dicts_local_params.append(dict_local_params)
         # global update
@@ -324,13 +329,14 @@ def main():
         # global valuation
         print(f'Round: [{r + 1}/{args.num_rounds}] Global Testing')
         global_model.eval(data_global_test, args.batch_size_test)
-        #print(f'A: {args.non_iid_alpha}')
-        #print(f'E: {args.num_epochs_local_training}')
-        #print(f'B: {args.batch_size_local_training}')
         print('Accuracy')
         print(global_model.epoch_acc)
         print('Loss')
         print(global_model.epoch_loss)
+    # 保存
+    save(global_model, '\ feddf_validate_acc,epoch=20,batchsize=64,round=32.pkl')
+    # 加载
+    # model = load('\model.pkl')
 
 
 if __name__ == '__main__':
